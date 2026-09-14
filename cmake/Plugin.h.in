@@ -1,0 +1,21 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <string_view>
+
+namespace Plugin
+{
+    using namespace std::literals;
+
+    inline constexpr auto NAME = "@PROJECT_NAME@"sv;
+    inline constexpr std::uint32_t VERSION_MAJOR = @PROJECT_VERSION_MAJOR@;
+    inline constexpr std::uint32_t VERSION_MINOR = @PROJECT_VERSION_MINOR@;
+    inline constexpr std::uint32_t VERSION_PATCH = @PROJECT_VERSION_PATCH@;
+    inline constexpr auto VERSION = std::to_array<std::uint16_t>({
+        VERSION_MAJOR,
+        VERSION_MINOR,
+        VERSION_PATCH,
+        0
+    });
+}

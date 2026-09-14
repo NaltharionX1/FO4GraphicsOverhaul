@@ -1,0 +1,300 @@
+diff --git a/sdk/include/FidelityFX/host/backends/dx11/ffx_dx11.h b/sdk/include/FidelityFX/host/backends/dx11/ffx_dx11.h
+index eaacdca..59c577a 100644
+--- a/sdk/include/FidelityFX/host/backends/dx11/ffx_dx11.h
++++ b/sdk/include/FidelityFX/host/backends/dx11/ffx_dx11.h
+@@ -44,6 +44,8 @@ extern "C" {
+ /// @ingroup DX11Backend
+ FFX_API size_t ffxGetScratchMemorySizeDX11(size_t maxContexts);
+ 
++FFX_API void ffxDx11SetFailureLog(void (*fn)(const char* message));
++
+ /// Create a <c><i>FfxDevice</i></c> from a <c><i>ID3D11Device</i></c>.
+ ///
+ /// @param [in] device                      A pointer to the DirectX11 device.
+diff --git a/sdk/src/backends/dx11/ffx_dx11.cpp b/sdk/src/backends/dx11/ffx_dx11.cpp
+index 30729dc..e033181 100644
+--- a/sdk/src/backends/dx11/ffx_dx11.cpp
++++ b/sdk/src/backends/dx11/ffx_dx11.cpp
+@@ -29,9 +29,32 @@
+ #include <../src/backends/shared/ffx_shader_blobs.h>
+ #include <codecvt>  // convert string to wstring
+ #include <mutex>
++#include <cstdarg>
++#include <cstdio>
+ 
+ extern "C" void CalculateDXBCChecksum(const DWORD* pData, DWORD dwSize, DWORD dwHash[4]);
+ 
++extern "C" {
++    volatile long g_ffxDx11TexUavCreateCalls = 0;
++    volatile long g_ffxDx11TexUavCreateFails = 0;
++}
++
++static void (*g_ffxDx11FailureLog)(const char*) = nullptr;
++extern "C" FFX_API void ffxDx11SetFailureLog(void (*fn)(const char* message)) { g_ffxDx11FailureLog = fn; }
++static void FfxDx11ReportFailure(const char* fmt, ...)
++{
++    if (g_ffxDx11FailureLog == nullptr) {
++        return;
++    }
++    char buffer[512];
++    va_list args;
++    va_start(args, fmt);
++    vsnprintf(buffer, sizeof(buffer), fmt, args);
++    va_end(args);
++    buffer[sizeof(buffer) - 1] = '\0';
++    g_ffxDx11FailureLog(buffer);
++}
++
+ // DX11 prototypes for functions in the backend interface
+ FfxUInt32 GetSDKVersionDX11(FfxInterface* backendInterface);
+ FfxErrorCode CreateBackendContextDX11(FfxInterface* backendInterface, FfxUInt32* effectContextId);
+@@ -79,6 +102,8 @@ typedef struct BackendContext_DX11 {
+     uint32_t                constantBufferSize[FFX_MAX_NUM_CONST_BUFFERS];
+     uint32_t                constantBufferOffset[FFX_MAX_NUM_CONST_BUFFERS];
+     std::mutex              constantBufferMutex;
++    bool                    cbNoOverwriteChecked = false;
++    bool                    cbNoOverwriteOk = false;
+ 
+     typedef struct alignas(32) EffectContext {
+ 
+@@ -217,6 +242,8 @@ static void TIF(HRESULT result)
+ #ifdef _DEBUG
+         int32_t msgboxID = MessageBoxW(NULL, errorMessage, L"Error", MB_OK);
+ #endif
++        FfxDx11ReportFailure("a D3D11 call failed: HRESULT 0x%08lx (%s) - the backend throws here; the host contains it and "
++                             "retains the partial context", static_cast<unsigned long>(result), errA);
+         throw 1;
+     }
+ }
+@@ -722,11 +749,7 @@ FfxErrorCode CreateBackendContextDX11(FfxInterface* backendInterface, FfxUInt32*
+         TIF(dx11Device->CreateBuffer(&constDesc, nullptr, &backendContext->constantBufferResource[0]));
+         SetNameDX11(backendContext->constantBufferResource[0], L"FFX_DX11_DynamicRingBuffer");
+ 
+-        // map it
+-        D3D11_MAPPED_SUBRESOURCE mappedSubresource = {};
+-        TIF(backendContext->deviceContext->Map(backendContext->constantBufferResource[0], 0,
+-            D3D11_MAP_WRITE_NO_OVERWRITE, 0, &mappedSubresource));
+-        backendContext->constantBufferMem[0] = mappedSubresource.pData;
++        backendContext->constantBufferMem[0] = nullptr;
+         backendContext->constantBufferOffset[0] = 0;
+     }
+ 
+@@ -758,6 +781,8 @@ FfxErrorCode GetDeviceCapabilitiesDX11(FfxInterface* backendInterface, FfxDevice
+     FFX_ASSERT(NULL != deviceCapabilities);
+     ID3D11Device* dx11Device = reinterpret_cast<ID3D11Device*>(backendInterface->device);
+ 
++    memset(deviceCapabilities, 0, sizeof(*deviceCapabilities));
++
+     // Check if we have shader model 6.6
+     D3D_FEATURE_LEVEL shaderModel = dx11Device->GetFeatureLevel();
+     switch (shaderModel) {
+@@ -832,7 +857,9 @@ FfxErrorCode DestroyBackendContextDX11(FfxInterface* backendInterface, FfxUInt32
+         for (size_t i = 0; i < FFX_MAX_NUM_CONST_BUFFERS; ++i) {
+ 
+             if (backendContext->constantBufferResource[i] != NULL) {
+-                backendContext->deviceContext->Unmap(backendContext->constantBufferResource[i], 0);
++                if (backendContext->constantBufferMem[i] != nullptr) {
++                    backendContext->deviceContext->Unmap(backendContext->constantBufferResource[i], 0);
++                }
+                 backendContext->constantBufferResource[i]->Release();
+                 backendContext->constantBufferResource[i] = NULL;
+                 backendContext->constantBufferMem[i] = nullptr;
+@@ -1118,7 +1145,14 @@ FfxErrorCode CreateResourceDX11(
+ 
+                         dx11UavDescription.Texture2D.MipSlice = currentMipIndex;
+ 
+-                        dx11Device->CreateUnorderedAccessView(dx11Resource, &dx11UavDescription, &backendResource->uavPtr[currentMipIndex]);
++                        ++g_ffxDx11TexUavCreateCalls;
++                        const HRESULT uavHr = dx11Device->CreateUnorderedAccessView(dx11Resource, &dx11UavDescription, &backendResource->uavPtr[currentMipIndex]);
++                        if (FAILED(uavHr)) {
++                            ++g_ffxDx11TexUavCreateFails;
++                            FfxDx11ReportFailure("texture UAV creation failed: HRESULT 0x%08lx, view format %d, mip %d - the effect will write "
++                                                 "nothing through this view and still report FFX_OK", static_cast<unsigned long>(uavHr),
++                                                 static_cast<int>(dx11UavDescription.Format), currentMipIndex);
++                        }
+                     }
+                 }
+             }
+@@ -1381,7 +1415,14 @@ FfxErrorCode RegisterResourceDX11(
+                         break;
+                     }
+ 
+-                    dx11Device->CreateUnorderedAccessView(dx11Resource, &dx11UavDescription, &backendResource->uavPtr[currentMipIndex]);
++                    ++g_ffxDx11TexUavCreateCalls;
++                    const HRESULT uavHr = dx11Device->CreateUnorderedAccessView(dx11Resource, &dx11UavDescription, &backendResource->uavPtr[currentMipIndex]);
++                    if (FAILED(uavHr)) {
++                        ++g_ffxDx11TexUavCreateFails;
++                        FfxDx11ReportFailure("texture UAV creation failed: HRESULT 0x%08lx, view format %d, mip %d - the effect will write "
++                                             "nothing through this view and still report FFX_OK", static_cast<unsigned long>(uavHr),
++                                             static_cast<int>(dx11UavDescription.Format), currentMipIndex);
++                    }
+                 }
+             }
+         }
+@@ -1566,8 +1607,14 @@ FfxErrorCode CreatePipelineDX11(
+         }
+ 
+         // create the PSO
+-        if (FAILED(dx11Device->CreateComputeShader(data, shaderBlob.size, nullptr, (ID3D11ComputeShader**)&outPipeline->pipeline)))
++        const HRESULT csHr = dx11Device->CreateComputeShader(data, shaderBlob.size, nullptr, (ID3D11ComputeShader**)&outPipeline->pipeline);
++        if (FAILED(csHr))
+         {
++            FfxDx11ReportFailure("CreateComputeShader failed for pass %u ('%ls', permutation 0x%08x, blob %u bytes): HRESULT 0x%08lx, "
++                                 "device-removed reason 0x%08lx - the context creation answers FFX_ERROR_BACKEND_API_ERROR",
++                static_cast<unsigned>(pass), pipelineDescription->name != nullptr ? pipelineDescription->name : L"?",
++                static_cast<unsigned>(permutationOptions), static_cast<unsigned>(shaderBlob.size),
++                static_cast<unsigned long>(csHr), static_cast<unsigned long>(dx11Device->GetDeviceRemovedReason()));
+             delete[] data;
+             return FFX_ERROR_BACKEND_API_ERROR;
+         }
+@@ -1769,14 +1816,33 @@ static FfxErrorCode executeGpuJobCompute(BackendContext_DX11* backendContext, Ff
+     dx11DeviceContext->CSSetShader(dx11ComputeShader, nullptr, 0);
+ 
+     // copy data to constant buffer and bind
++    bool cbFailed = false;
+     {
+         std::lock_guard<std::mutex> cbLock{ backendContext->constantBufferMutex };
+-        for (uint32_t currentRootConstantIndex = 0; currentRootConstantIndex < job->computeJobDescriptor.pipeline.constCount; ++currentRootConstantIndex) {
++
++        if (!backendContext->cbNoOverwriteChecked) {
++            D3D11_FEATURE_DATA_D3D11_OPTIONS opts = {};
++            if (SUCCEEDED(dx11Device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &opts, sizeof(opts))))
++                backendContext->cbNoOverwriteOk = opts.MapNoOverwriteOnDynamicConstantBuffer != FALSE;
++            backendContext->cbNoOverwriteChecked = true;
++        }
++        const bool ringPath = backendContext->deviceContext1 != NULL && backendContext->cbNoOverwriteOk;
++
++        if (ringPath) {
++            uint32_t totalSize = 0;
++            for (uint32_t i = 0; i < job->computeJobDescriptor.pipeline.constCount; ++i)
++                totalSize += FFX_ALIGN_UP(job->computeJobDescriptor.cbs[i].num32BitEntries * sizeof(uint32_t), 256);
++            if (totalSize > backendContext->constantBufferSize[0])
++                cbFailed = true;
++            else if (backendContext->constantBufferOffset[0] + totalSize >= backendContext->constantBufferSize[0])
++                backendContext->constantBufferOffset[0] = 0;
++        }
++
++        for (uint32_t currentRootConstantIndex = 0; !cbFailed && currentRootConstantIndex < job->computeJobDescriptor.pipeline.constCount; ++currentRootConstantIndex) {
+ 
+             uint32_t size = FFX_ALIGN_UP(job->computeJobDescriptor.cbs[currentRootConstantIndex].num32BitEntries * sizeof(uint32_t), 256);
+ 
+-            // Direct3D 11.0
+-            if (backendContext->deviceContext1 == NULL) {
++            if (!ringPath) {
+ 
+                 if (backendContext->constantBufferSize[currentRootConstantIndex] < size) {
+ 
+@@ -1791,19 +1857,25 @@ static FfxErrorCode executeGpuJobCompute(BackendContext_DX11* backendContext, Ff
+                     constDesc.Usage = D3D11_USAGE_DYNAMIC;
+                     constDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                     constDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+-                    TIF(dx11Device->CreateBuffer(&constDesc, nullptr, &backendContext->constantBufferResource[currentRootConstantIndex]));
++                    if (FAILED(dx11Device->CreateBuffer(&constDesc, nullptr, &backendContext->constantBufferResource[currentRootConstantIndex])) ||
++                        backendContext->constantBufferResource[currentRootConstantIndex] == NULL) {
++                        backendContext->constantBufferResource[currentRootConstantIndex] = NULL;
++                        backendContext->constantBufferSize[currentRootConstantIndex] = 0;
++                        cbFailed = true;
++                        break;
++                    }
+                     SetNameDX11(backendContext->constantBufferResource[currentRootConstantIndex], L"FFX_DX11_ConstantBuffer");
+                 }
+ 
+-                if (backendContext->constantBufferResource[currentRootConstantIndex] != NULL) {
+-
++                {
+                     D3D11_MAPPED_SUBRESOURCE mappedSubresource = {};
+-                    TIF(backendContext->deviceContext->Map(backendContext->constantBufferResource[currentRootConstantIndex], 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedSubresource));
+-
+-                    if (mappedSubresource.pData) {
+-                        memcpy(mappedSubresource.pData, job->computeJobDescriptor.cbs[currentRootConstantIndex].data, job->computeJobDescriptor.cbs[currentRootConstantIndex].num32BitEntries * sizeof(uint32_t));
+-                        backendContext->deviceContext->Unmap(backendContext->constantBufferResource[currentRootConstantIndex], 0);
++                    if (FAILED(backendContext->deviceContext->Map(backendContext->constantBufferResource[currentRootConstantIndex], 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedSubresource)) ||
++                        !mappedSubresource.pData) {
++                        cbFailed = true;
++                        break;
+                     }
++                    memcpy(mappedSubresource.pData, job->computeJobDescriptor.cbs[currentRootConstantIndex].data, job->computeJobDescriptor.cbs[currentRootConstantIndex].num32BitEntries * sizeof(uint32_t));
++                    backendContext->deviceContext->Unmap(backendContext->constantBufferResource[currentRootConstantIndex], 0);
+ 
+                     dx11DeviceContext->CSSetConstantBuffers(currentRootConstantIndex, 1, &backendContext->constantBufferResource[currentRootConstantIndex]);
+                 }
+@@ -1811,11 +1883,18 @@ static FfxErrorCode executeGpuJobCompute(BackendContext_DX11* backendContext, Ff
+                 continue;
+             }
+ 
+-            if (backendContext->constantBufferOffset[0] + size >= backendContext->constantBufferSize[0])
+-                backendContext->constantBufferOffset[0] = 0;
+-
+-            void* pBuffer = (void*)((uint8_t*)(backendContext->constantBufferMem[0]) + backendContext->constantBufferOffset[0]);
+-            memcpy(pBuffer, job->computeJobDescriptor.cbs[currentRootConstantIndex].data, job->computeJobDescriptor.cbs[currentRootConstantIndex].num32BitEntries * sizeof(uint32_t));
++            const D3D11_MAP cbMapType = backendContext->constantBufferOffset[0] == 0
++                                            ? D3D11_MAP_WRITE_DISCARD
++                                            : D3D11_MAP_WRITE_NO_OVERWRITE;
++            D3D11_MAPPED_SUBRESOURCE mappedCb = {};
++            if (FAILED(backendContext->deviceContext->Map(backendContext->constantBufferResource[0], 0, cbMapType, 0, &mappedCb)) || !mappedCb.pData) {
++                cbFailed = true;
++                break;
++            }
++            memcpy((uint8_t*)mappedCb.pData + backendContext->constantBufferOffset[0],
++                job->computeJobDescriptor.cbs[currentRootConstantIndex].data,
++                job->computeJobDescriptor.cbs[currentRootConstantIndex].num32BitEntries * sizeof(uint32_t));
++            backendContext->deviceContext->Unmap(backendContext->constantBufferResource[0], 0);
+ 
+             uint32_t first = backendContext->constantBufferOffset[0] / sizeof(FfxFloat32x4);
+             uint32_t num = size / sizeof(FfxFloat32x4);
+@@ -1827,6 +1906,17 @@ static FfxErrorCode executeGpuJobCompute(BackendContext_DX11* backendContext, Ff
+         }
+     }
+ 
++    if (cbFailed) {
++        static ID3D11UnorderedAccessView* const emptyUAVsOnFail[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
++        if (minimumUav <= maximumUav)
++            dx11DeviceContext->CSSetUnorderedAccessViews(minimumUav, maximumUav - minimumUav + 1, emptyUAVsOnFail, nullptr);
++        static ID3D11ShaderResourceView* const emptySRVsOnFail[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
++        if (minimumSrv <= maximumSrv)
++            dx11DeviceContext->CSSetShaderResources(minimumSrv, maximumSrv - minimumSrv + 1, emptySRVsOnFail);
++        dx11DeviceContext->CSSetShader(nullptr, nullptr, 0);
++        return FFX_ERROR_BACKEND_API_ERROR;
++    }
++
+     // dispatch
+     dx11DeviceContext->Dispatch(job->computeJobDescriptor.dimensions[0], job->computeJobDescriptor.dimensions[1], job->computeJobDescriptor.dimensions[2]);
+ 
+@@ -1885,7 +1975,7 @@ FfxErrorCode ExecuteGpuJobsDX11(
+     FfxErrorCode errorCode = FFX_OK;
+ 
+     // execute all GpuJobs
+-    for (uint32_t currentGpuJobIndex = 0; currentGpuJobIndex < backendContext->gpuJobCount; ++currentGpuJobIndex) {
++    for (uint32_t currentGpuJobIndex = 0; currentGpuJobIndex < backendContext->gpuJobCount && errorCode == FFX_OK; ++currentGpuJobIndex) {
+ 
+         FfxGpuJobDescription* GpuJob = &backendContext->pGpuJobs[currentGpuJobIndex];
+         ID3D11Device* dx11Device = backendContext->device;
+@@ -1910,12 +2000,11 @@ FfxErrorCode ExecuteGpuJobsDX11(
+         }
+     }
+ 
+-    // check the execute function returned cleanly.
++    backendContext->gpuJobCount = 0;
++
+     FFX_RETURN_ON_ERROR(
+         errorCode == FFX_OK,
+         FFX_ERROR_BACKEND_API_ERROR);
+ 
+-    backendContext->gpuJobCount = 0;
+-
+     return FFX_OK;
+ }
+diff --git a/sdk/src/components/fsr3/ffx_fsr3.cpp b/sdk/src/components/fsr3/ffx_fsr3.cpp
+index c355251..7891198 100644
+--- a/sdk/src/components/fsr3/ffx_fsr3.cpp
++++ b/sdk/src/components/fsr3/ffx_fsr3.cpp
+@@ -506,7 +506,8 @@ FfxErrorCode ffxFsr3ContextDestroy(FfxFsr3Context* context)
+ 
+     for (FfxUInt32 i = 0; i < FFX_FSR3_RESOURCE_IDENTIFIER_COUNT; i++)
+     {
+-        FFX_VALIDATE(contextPrivate->backendInterfaceSharedResources.fpDestroyResource(&contextPrivate->backendInterfaceSharedResources, contextPrivate->sharedResources[i], contextPrivate->effectContextIdSharedResources))
++        if (contextPrivate->sharedResources[i].internalIndex != 0)
++            contextPrivate->backendInterfaceSharedResources.fpDestroyResource(&contextPrivate->backendInterfaceSharedResources, contextPrivate->sharedResources[i], contextPrivate->effectContextIdSharedResources);
+     }
+ 
+     bool upscalingOnly     = (contextPrivate->description.flags & FFX_FSR3_ENABLE_UPSCALING_ONLY) != 0;

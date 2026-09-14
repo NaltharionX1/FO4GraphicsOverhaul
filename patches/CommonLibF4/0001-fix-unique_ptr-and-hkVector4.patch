@@ -1,0 +1,35 @@
+diff --git a/CommonLibF4/include/RE/Havok/hkVector4.h b/CommonLibF4/include/RE/Havok/hkVector4.h
+index c2a953c..8b1334d 100644
+--- a/CommonLibF4/include/RE/Havok/hkVector4.h
++++ b/CommonLibF4/include/RE/Havok/hkVector4.h
+@@ -133,7 +133,7 @@ namespace RE
+ 			this->z /= l;
+ 			return *this;
+ 		}
+-		hkVector4f& GetNormalized()
++		hkVector4f GetNormalized()
+ 		{
+ 			hkVector4f norm = *this;
+ 			norm.Normalize();
+diff --git a/CommonLibF4/include/RE/msvc/memory.h b/CommonLibF4/include/RE/msvc/memory.h
+index c8450c7..08160db 100644
+--- a/CommonLibF4/include/RE/msvc/memory.h
++++ b/CommonLibF4/include/RE/msvc/memory.h
+@@ -270,7 +270,7 @@ namespace RE::msvc
+ 
+ 		// 3c
+ 		unique_ptr(pointer a_ptr, const deleter_type& a_dtor) noexcept  //
+-			requires((std::is_lvalue_reference<deleter_type> &&
++			requires((std::is_lvalue_reference_v<deleter_type> &&
+ 					  std::is_const_v<deleter_type>)) :
+ 			super(a_ptr, a_dtor)
+ 		{}
+@@ -484,7 +484,7 @@ namespace RE::msvc
+ 		// 3c
+ 		template <class U>
+ 		unique_ptr(U a_ptr, const deleter_type& a_dtor) noexcept  //
+-			requires((std::is_lvalue_reference<deleter_type> &&
++			requires((std::is_lvalue_reference_v<deleter_type> &&
+ 					  std::is_const_v<deleter_type> &&
+ 					  detail::unique_ptr_array_convertible<U, unique_ptr>)) :
+ 			super(a_ptr, a_dtor)

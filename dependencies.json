@@ -1,0 +1,80 @@
+{
+  "sources": [
+    {
+      "name": "CommonLibF4",
+      "purpose": "Fallout 4 game API and Address Library access (pre-next-gen line)",
+      "url": "https://github.com/shad0wshayd3-FO4/CommonLibF4",
+      "commit": "2e5b66108bc8cc125a32372f75865fd62c2d525e",
+      "sparse": ["CommonLibF4", "LICENSE", ".clang-format"],
+      "patches": ["patches/CommonLibF4/0001-fix-unique_ptr-and-hkVector4.patch"],
+      "license": "MIT"
+    },
+    {
+      "name": "imgui",
+      "purpose": "Dear ImGui 1.92.8: the in-game menu and overlay",
+      "url": "https://github.com/ocornut/imgui",
+      "commit": "8936b58fe26e8c3da834b8f60b06511d537b4c63",
+      "sparse": [],
+      "patches": [],
+      "license": "MIT"
+    },
+    {
+      "name": "nvapi",
+      "purpose": "NVIDIA NVAPI R615: Reflex low-latency mode and display queries",
+      "url": "https://github.com/NVIDIA/nvapi",
+      "commit": "a08f45f737bb142b070f1e23c58466ecbc82e398",
+      "sparse": [],
+      "patches": [],
+      "license": "MIT"
+    },
+    {
+      "name": "XeGTAO",
+      "purpose": "Intel XeGTAO ambient occlusion shaders",
+      "url": "https://github.com/GameTechDev/XeGTAO",
+      "commit": "a5b1686c7ea37788eeb3576b5be47f7c03db532c",
+      "sparse": ["Source/Rendering/Shaders", "LICENSE"],
+      "patches": [],
+      "license": "MIT"
+    },
+    {
+      "name": "detours",
+      "purpose": "Nukem's x64 function detours (with Zydis)",
+      "url": "https://github.com/Nukem9/detours",
+      "commit": "cc5a2e4a58ef462821877b35ad30215f0e16bba1",
+      "sparse": [],
+      "patches": [],
+      "license": "MIT"
+    },
+    {
+      "name": "FidelityFX-SDK-DX11",
+      "purpose": "AMD FidelityFX SDK, community DirectX 11 port: the FSR 3.1 upscaler",
+      "url": "https://github.com/alandtse/FidelityFX-SDK-DX11",
+      "commit": "054f0ade7bd443710644ecb2564936281821f532",
+      "sparse": ["sdk", "LICENSE.txt"],
+      "patches": ["patches/FidelityFX-SDK-DX11/0001-dx11-backend-robustness.patch"],
+      "license": "MIT"
+    },
+    {
+      "name": "FidelityFX-SDK",
+      "purpose": "AMD FidelityFX API 2.3.0: FSR frame generation interface and AMD's signed runtime DLLs",
+      "url": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK",
+      "commit": "60f4ea81909200d8542eca14dccb2628b763a9a3",
+      "sparse": ["Kits/FidelityFX/api", "Kits/FidelityFX/framegeneration", "Kits/FidelityFX/signedbin", "LICENSE.txt"],
+      "patches": [],
+      "license": "MIT (source); AMD redistributable terms (signed DLLs)"
+    }
+  ],
+  "runtimes": [
+    {
+      "name": "NVIDIA DLSS 310.9.1 (Super Resolution and Frame Generation)",
+      "archive": "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.1/streamline-sdk-v2.14.1.zip",
+      "files": [
+        { "from": "bin/x64/nvngx_dlss.dll", "sha256": "3975567b8943c53acce397f2b72380092f84f162d00b0d2c7d08a1025c563983" },
+        { "from": "bin/x64/nvngx_dlssg.dll", "sha256": "ff6e90eb78b827927dff5b4ecc6b1c870c2e9bca29ed9f48c7d348cc9e170b82" },
+        { "from": "bin/x64/nvngx_dlss.license.txt", "sha256": "3027f23ca5a46dd9cb8183fbd522983a86f64d7daac5982912bf9f214671f294" }
+      ],
+      "to": "runtime/nvidia",
+      "license": "NVIDIA DLSS SDK licence (the licence text travels with the files)"
+    }
+  ]
+}
